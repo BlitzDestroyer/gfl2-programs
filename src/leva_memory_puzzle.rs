@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use clap::ValueEnum;
 use const_format::formatcp;
 use reqwest::header::HeaderMap;
 use serde::Deserialize;
@@ -13,6 +14,7 @@ const BASE_URL: &str = "https://gf2-h5ump45gacha-us-api.sunborngame.com";
 const REFRESH_ENDPOINT: &str = formatcp!("{}/refresh", BASE_URL);
 const PLAY_CLICK_ENDPOINT: &str = formatcp!("{}/play_click", BASE_URL);
 const INFO_ENDPOINT: &str = formatcp!("{}/info", BASE_URL);
+const GACHA_ENDPOINT: &str = formatcp!("{}/gacha", BASE_URL);
 
 #[derive(Debug, Error)]
 pub enum PuzzleError {
@@ -85,69 +87,215 @@ pub struct TaskInfo {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GachaData {
+    pub is_code: i32,
+    pub name: String,
+    pub pic: String,
+    pub record_id: i32,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PuzzleConfig {
     pub auth_token: String,
 }
 
-pub async fn solve_puzzle(auth_token: &str) -> Result<(), PuzzleError> {
-    let auth_token = if auth_token.is_empty() {
-        get_auth_token()?
-    } 
-    else {
-        auth_token.to_string()
-    };
+#[derive(Debug)]
+pub struct LevaPuzzleClient {
+    _auth_token: String,
+    client: reqwest::Client,
+}
 
-    if auth_token.is_empty() {
-        return Err(PuzzleError::AuthTokenMissing);
+impl LevaPuzzleClient {
+    pub fn new(auth_token: &str) -> Result<Self, PuzzleError> {
+        let auth_token = if auth_token.is_empty() {
+            get_auth_token()?
+        } 
+        else {
+            auth_token.to_string()
+        };
+
+        if auth_token.is_empty() {
+            return Err(PuzzleError::AuthTokenMissing);
+        }
+
+        let mut header_map = HeaderMap::new();
+        header_map.insert("Authorization", auth_token.parse().unwrap());
+        let client = reqwest::Client::builder()
+            .default_headers(header_map)
+            .build()?;
+
+        Ok(LevaPuzzleClient {
+            _auth_token: auth_token,
+            client,
+        })
     }
 
-    let mut header_map = HeaderMap::new();
-    header_map.insert("Authorization", auth_token.parse().unwrap());
-    let client = reqwest::Client::builder()
-        .default_headers(header_map)
-        .build()?;
-    
-    let mut seen = vec![String::new(); BOARD_SIZE];
-    let mut solved_indices = HashSet::new();
+    async fn get_info_data_response(&self) -> Result<GflEndpointResponse<InfoData>, PuzzleError> {
+        let response = self.client.get(INFO_ENDPOINT)
+            .send()
+            .await?;
 
-    let response = client.get(INFO_ENDPOINT)
-        .send()
-        .await?;
+        let status_code = response.status();
+        debug_println!("Info response status code: {}", status_code);
+        if status_code != 200 {
+            let response = response
+                .json::<GflEndpointResponse<bool>>()
+                .await?;
+            let err_msg = format!("Failed to get game info. Reason: {}", response.message);
+            eprintln!("{}", err_msg);
 
-    let status_code = response.status();
-    let response = response
-        .json::<GflEndpointResponse<InfoData>>()
-        .await?;
-    debug_println!("Info response status code: {}", status_code);
-    if status_code != 200 {
-        let err_msg = format!("Failed to get game info. Reason: {}", response.message);
-        eprintln!("{}", err_msg);
-        return Err(PuzzleError::Info(err_msg));
+            Err(PuzzleError::Info(err_msg))
+        }
+        else{
+            let response = response
+                .json::<GflEndpointResponse<InfoData>>()
+                .await?;
+
+            Ok(response)
+        }
     }
 
-    let info_data = response.data;
+    async fn refresh_game_state(&self) -> Result<GflEndpointResponse<RefreshData>, PuzzleError> {
+        let response = self.client.post(REFRESH_ENDPOINT)
+            .json(&json!({}))
+            .send()
+            .await?;
+
+        let status_code = response.status();
+        if status_code != 200 {
+            let response = response
+                .json::<GflEndpointResponse<bool>>()
+                .await?;
+
+            let err_msg = format!("Failed to refresh game state. Reason: {}", response.message);
+            eprintln!("{}", err_msg);
+            Err(PuzzleError::Info(err_msg.to_string()))
+        }
+        else{
+            let response = response
+                .json::<GflEndpointResponse<RefreshData>>()
+                .await?;
+
+            Ok(response)
+        }
+
+        
+    }
+
+    async fn play_click(&self, index: usize) -> Result<GflEndpointResponse<PlayClickData>, PuzzleError> {
+        let response = self.client.post(PLAY_CLICK_ENDPOINT)
+            .json(&json!({ "index": index }))
+            .send()
+            .await?;
+
+        let status_code = response.status();
+        debug_println!("Play click response status code: {}", status_code);
+
+        if status_code != 200 {
+            let response = response
+                .json::<GflEndpointResponse<bool>>()
+                .await?;
+            let err_msg = format!("Failed to play click. Reason: {}", response.message);
+            eprintln!("{}", err_msg);
+
+            Err(PuzzleError::Info(err_msg))
+        }
+        else{
+            let response = response
+                .json::<GflEndpointResponse<PlayClickData>>()
+                .await?;
+
+            Ok(response)
+        }
+    }
+
+    async fn roll_gacha(&self) -> Result<GflEndpointResponse<GachaData>, PuzzleError> {
+        let response = self.client.post(GACHA_ENDPOINT)
+            .send()
+            .await?;
+
+        let status_code = response.status();
+        debug_println!("Gacha response status code: {}", status_code);
+
+        if status_code != 200 {
+            let response = response
+                .json::<GflEndpointResponse<bool>>()
+                .await?;
+
+            let err_msg = format!("Failed to roll gacha. Reason: {}", response.message);
+            eprintln!("{}", err_msg);
+            
+            Err(PuzzleError::Info(err_msg))
+        }
+        else{
+            let response = response
+                .json::<GflEndpointResponse<GachaData>>()
+                .await?;
+
+            Ok(response)
+        }
+    }
+}
+
+#[derive(Debug, ValueEnum, Clone, Copy)]
+pub enum Attempts {
+    None,
+    One,
+    All
+}
+
+impl std::fmt::Display for Attempts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Attempts::None => write!(f, "none"),
+            Attempts::One => write!(f, "one"),
+            Attempts::All => write!(f, "all"),
+        }
+    }
+}
+
+pub async fn solve_puzzle(client: &LevaPuzzleClient, attempts: Attempts) -> Result<(), PuzzleError> {
+    if matches!(attempts, Attempts::None) {
+        debug_println!("No puzzle attempts specified. Skipping puzzle solving.");
+        return Ok(());
+    }
+
+    let mut response = client.get_info_data_response().await?;
+    let info_data = &response.data;
     if info_data.play_num < 1 {
         let err_msg = "No available plays left for today.";
         eprintln!("{}", err_msg);
         return Err(PuzzleError::Info(err_msg.to_string()));
     }
-    
-    let (ongoing, mut last_seen, mut last_seen_index) = determine_current_game_state(&info_data, &mut seen, &mut solved_indices);
+
+    match attempts {
+        Attempts::None => unreachable!(),
+        Attempts::One => {
+            solve_puzzle_helper(client, &info_data).await?;
+        },
+        Attempts::All => {
+            for _ in 0..info_data.play_num {
+                let info_data = &response.data;
+                solve_puzzle_helper(client, &info_data).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await; // Small delay to avoid spamming the server
+                response = client.get_info_data_response().await?;
+            }
+        },
+    }
+
+    Ok(())
+}
+
+async fn solve_puzzle_helper(client: &LevaPuzzleClient, info_data: &InfoData) -> Result<(), PuzzleError> {
+    let mut seen = vec![String::new(); BOARD_SIZE];
+    let mut solved_indices = HashSet::new();
+    let (ongoing, mut last_seen, mut last_seen_index) = determine_current_game_state(info_data, &mut seen, &mut solved_indices);
     if !ongoing {
         println!("No ongoing game found. Starting a new game...");
         seen.iter_mut().for_each(|s| *s = String::new());
         solved_indices.clear();
 
-        let response = client.post(REFRESH_ENDPOINT)
-            .json(&json!({}))
-            .send()
-            .await?;
-        let status_code = response.status();
-        if status_code != 200 {
-            let err_msg = "Failed to refresh game state. Check your authentication token.";
-            eprintln!("{}", err_msg);
-            return Err(PuzzleError::Info(err_msg.to_string()));
-        }
+        client.refresh_game_state().await?;
     }
     else{
         println!("Resuming ongoing game...");
@@ -165,20 +313,7 @@ pub async fn solve_puzzle(auth_token: &str) -> Result<(), PuzzleError> {
             return Err(PuzzleError::Info(err_msg.to_string()));
         }
 
-        let response = client.post(PLAY_CLICK_ENDPOINT)
-            .json(&json!({ "index": index }))
-            .send()
-            .await?;
-        let status_code = response.status();
-        let response = response
-            .json::<GflEndpointResponse<PlayClickData>>()
-            .await?;
-        debug_println!("Play click response status code: {}", status_code);
-        if status_code != 200 {
-            let err_msg = format!("Failed to play click. Reason: {}", response.message);
-            eprintln!("{}", err_msg);
-            return Err(PuzzleError::Info(err_msg));
-        }
+        let response = client.play_click(index).await?;
 
         if response.message != "OK" {
             let err_msg = format!("Error from server: {}", response.message);
@@ -323,4 +458,49 @@ fn get_auth_token() -> Result<String, PuzzleError> {
             _ => Err(PuzzleError::Io(err)),
         },
     }
+}
+
+pub async fn roll_gacha(client: &LevaPuzzleClient, attempts: Attempts) -> Result<(), PuzzleError> {
+    if matches!(attempts, Attempts::None) {
+        debug_println!("No gacha attempts specified. Skipping gacha roll.");
+        return Ok(());
+    }
+
+    let info_response = client.get_info_data_response().await?;
+    let gacha_num = info_response.data.gacha_num;
+    if gacha_num < 1 {
+        let err_msg = "No gacha attempts left.";
+        eprintln!("{}", err_msg);
+        return Err(PuzzleError::Info(err_msg.to_string()));
+    }
+
+    match attempts {
+        Attempts::None => unreachable!(),
+        Attempts::One => {
+            roll_gacha_helper(client).await?;
+        },
+        Attempts::All => {
+            for _ in 0..gacha_num {
+                roll_gacha_helper(client).await?;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await; // Small delay to avoid spamming the server
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn roll_gacha_helper(client: &LevaPuzzleClient) -> Result<(), PuzzleError> {
+    println!("Rolling gacha...");
+    let gacha_response = client.roll_gacha().await?;
+    if gacha_response.message != "OK" {
+        let err_msg = format!("Error from server: {}", gacha_response.message);
+        eprintln!("{}", err_msg);
+        return Err(PuzzleError::Info(err_msg));
+    }
+
+    let gacha_data = gacha_response.data;
+    println!("Gacha Result: {}", gacha_data.name);
+
+    Ok(())
 }
