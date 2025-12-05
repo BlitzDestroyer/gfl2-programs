@@ -126,6 +126,12 @@ pub async fn solve_puzzle(auth_token: &str) -> Result<(), PuzzleError> {
     }
 
     let info_data = response.data;
+    if info_data.play_num < 1 {
+        let err_msg = "No available plays left for today.";
+        eprintln!("{}", err_msg);
+        return Err(PuzzleError::Info(err_msg.to_string()));
+    }
+    
     let (ongoing, mut last_seen, mut last_seen_index) = determine_current_game_state(&info_data, &mut seen, &mut solved_indices);
     if !ongoing {
         println!("No ongoing game found. Starting a new game...");
